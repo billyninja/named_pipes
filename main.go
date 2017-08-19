@@ -3,7 +3,6 @@ package main
 import (
     "encoding/gob"
     "bytes"
-    "sync"
     "log"
     "os"
     "syscall"
@@ -34,8 +33,41 @@ func (s Status) String() string {
     return fmt.Sprintf("2XX:\n%v\n4XX:\n%v\n5XX\n%v\n", s.X200, s.X400, s.X500)
 }
 
+
+func write(st Status) {
+    t1 := time.Now()
+    var wbuff bytes.Buffer
+    enc := gob.NewEncoder(&wbuff)
+    enc.Encode(st)
+    err := ioutil.WriteFile("/tmp/stats_pipe", wbuff.Bytes(), os.ModeNamedPipe)
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("1 - written %d \n", len(wbuff.Bytes()))
+    lat := time.Since(t1)
+
+    st.X200.Count += 1
+    st.X200.Len += int64(len(wbuff.Bytes()))
+    st.X200.AvgLat += lat
+    st.X200.AvgLat /= 2
+}
+
+func read() {
+    var st2 Status
+
+    rChunk, err := ioutil.ReadFile("/tmp/stats_pipe")
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    rbuff := bytes.NewBuffer(rChunk)
+    dec := gob.NewDecoder(rbuff)
+    dec.Decode(&st2)
+
+    fmt.Printf("2 - Read %v\n", st2)
+}
+
 func main() {
-    var wg sync.WaitGroup
     syscall.Mkfifo("/tmp/stats_pipe", 0666)
 
     st := Status{
@@ -45,46 +77,23 @@ func main() {
     }
 
     for {
-        // listener
-        wg.Add(1)
-        go func() {
-            rChunk, err := ioutil.ReadFile("/tmp/stats_pipe")
-            if err != nil {
-                log.Fatal(err)
-            }
-            rbuff := bytes.NewBuffer(rChunk)
-            dec := gob.NewDecoder(rbuff)
-            var st2 Status
-            dec.Decode(&st2)
 
-            fmt.Printf("2 - Read %v\n", st2)
-            wg.Done()
+        go func() {
+            read()
         }()
 
-        // writer
-        wg.Add(1)
         go func() {
-            t1 := time.Now()
-            var wbuff bytes.Buffer
-            enc := gob.NewEncoder(&wbuff)
-            enc.Encode(st)
-            err := ioutil.WriteFile("/tmp/stats_pipe", wbuff.Bytes(), os.ModeNamedPipe)
-            if err != nil {
-                log.Fatal(err)
-            }
-            fmt.Printf("1 - written %d \n", len(wbuff.Bytes()))
-            lat := time.Since(t1)
-
-            st.X200.Count += 1
-            st.X200.Len += int64(len(wbuff.Bytes()))
-            st.X200.AvgLat += lat
-            st.X200.AvgLat /= 2
-
-            wg.Done()
+            write(st)
         }()
-        wg.Wait()
+
+        go func() {
+            read()
+        }()
+
+        go func() {
+            write(st)
+        }()
 
         time.Sleep(1 * time.Second)
     }
 }
-
